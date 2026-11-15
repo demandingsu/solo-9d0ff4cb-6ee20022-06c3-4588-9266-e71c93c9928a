@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""端到端演示：等价变异归并、版本乐观锁、坏行隔离。
+"""端到端演示：等价变异归并、版本乐观锁、坏行隔离、编辑冲突核查。
 
 用法：
     python3 scripts/demo.py [BASE_URL]     # 默认 http://localhost:8000
@@ -120,7 +120,38 @@ def main():
          {"version": d3["version"], "variant_count": d3["variant_count"]})
 
     assert d3["version"] == 2 and core(d3["variants"]) == core(d2["variants"])
-    print("\n演示完成：等价变异已归并，坏行与版本冲突均未影响已发布数据。")
+
+    # ---- 编辑冲突核查 ----
+    status, ds2 = req("POST", "/datasets", {"name": "demo-编辑冲突"})
+    conflict_id = ds2["id"]
+    show("12. 新建数据集用于冲突核查", status, ds2)
+
+    status, early = req("GET", f"/datasets/{conflict_id}/conflicts")
+    show("13. 未发布时核查：应 409", status, early)
+    assert status == 409
+
+    DATASET_ID = conflict_id
+    status, job4 = upload("conflicts.vcf")
+    show("14. 上传冲突边界样例（17 行归并 15 个位点）", status,
+         {"id": job4["id"], "status": job4["status"], "total_records": job4["total_records"]})
+
+    status, pub4 = req("POST", f"/datasets/{conflict_id}/publish",
+                       {"job_id": job4["id"], "expected_version": 0})
+    show("15. 发布 v0 -> v1", status, pub4)
+
+    status, report = req("GET", f"/datasets/{conflict_id}/conflicts")
+    show("16. 冲突核查：五类规则共 9 对，版本与位点对来自同一快照", status,
+         {"version": report["version"], "variant_count": report["variant_count"],
+          "conflict_count": report["conflict_count"],
+          "by_type": {t: sum(1 for c in report["conflicts"] if c["type"] == t)
+                      for t in sorted({c["type"] for c in report["conflicts"]})}})
+    assert report["version"] == 1 and report["conflict_count"] == 9
+    first = report["conflicts"][0]
+    print("    示例冲突对：", first["type"],
+          (first["a"]["pos"], first["a"]["ref"], first["a"]["alt"], first["a"]["lines"]), "<->",
+          (first["b"]["pos"], first["b"]["ref"], first["b"]["alt"], first["b"]["lines"]))
+
+    print("\n演示完成：等价变异已归并，坏行与版本冲突均未影响已发布数据，编辑冲突核查通过。")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,21 @@
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=40>
+##source=conflict-boundary-demo
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chr1	17	.	A	G	50	PASS	CASE=snv-dup1
+chr1	17	.	A	G	50	PASS	CASE=snv-dup2
+chr1	17	.	A	T	50	PASS	CASE=snv-conflict
+chr1	20	.	GAC	G	50	PASS	CASE=del1-deletes-21-22
+chr1	21	.	ACG	A	50	PASS	CASE=del2-deletes-22-23
+chr1	22	.	CGT	C	50	PASS	CASE=del3-deletes-23-24
+chr1	22	.	C	T	50	PASS	CASE=snv-in-del1-del2
+chr1	24	.	T	A	50	PASS	CASE=snv-in-del3-only
+chr1	20	.	G	A	50	PASS	CASE=snv-on-del1-anchor-no-conflict
+chr1	20	.	G	GA	50	PASS	CASE=ins-one-flank-deleted-no-conflict
+chr1	30	.	T	TA	50	PASS	CASE=ins-dup1
+chr1	30	.	T	TA	50	PASS	CASE=ins-dup2
+chr1	30	.	T	TC	50	PASS	CASE=ins-same-breakpoint-conflict
+chr1	35	.	A	AG	50	PASS	CASE=ins-both-flanks-deleted
+chr1	34	.	TA	T	50	PASS	CASE=del-left-flank-35
+chr1	35	.	AC	A	50	PASS	CASE=del-right-flank-36
+chr1	36	.	C	CG	50	PASS	CASE=ins-one-flank-deleted-no-conflict

@@ -6,8 +6,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 
+from .conflicts import find_conflicts
 from .parse import ParseError
 from .schemas import (
+    ConflictReport,
     DatasetCreate,
     DatasetDetail,
     DatasetOut,
@@ -36,6 +38,8 @@ app = FastAPI(
         "**流程**：创建数据集 → 上传单染色体 FASTA + 双等位 SNV/插入/缺失 VCF（生成暂存任务）→ "
         "按查询所得版本号发布（乐观锁整体替换）。\n\n"
         "**归一化**：逐条核对 REF → 消去共有前后缀 → 保留锚点 → 串联重复左对齐 → 归并等价位点（保留各原始行号）。\n\n"
+        "**冲突核查**：对已发布位点检测五类编辑冲突（同位点不同 SNV、删除碱基重叠、SNV 落入删除范围、"
+        "同断点不同插入、插入断点两侧均被删除），只报告实际冲突对，版本与位点对来自同一已提交快照。\n\n"
         "**一致性**：处理期间查询仍返回完整旧版；并发发布仅版本匹配者成功；坏行或发布失败不改动旧版。"
     ),
 )
@@ -128,6 +132,38 @@ def get_job(dataset_id: int, job_id: int, request: Request):
     if job is None:
         raise HTTPException(status_code=404, detail=f"任务 {job_id} 不存在")
     return job
+
+
+@app.get(
+    "/datasets/{dataset_id}/conflicts",
+    response_model=ConflictReport,
+    summary="核查数据集内已发布位点的编辑冲突",
+    responses={
+        404: {"description": "数据集不存在"},
+        409: {"description": "数据集尚未发布，无可核查的已发布位点"},
+    },
+)
+def check_conflicts(dataset_id: int, request: Request):
+    """检测当前已发布版本中无法同时套用到同一参考编辑路径的位点对。
+
+    只读取已发布的规范化 SNV/插入/缺失；版本号与全部位点对取自同一
+    已提交快照（并发发布不会读到混合状态）。仅报告实际冲突对：
+    冲突不可传递，仅共用 VCF 锚点不算冲突。
+    """
+    snap = get_store(request).get_published_snapshot(dataset_id)
+    if snap is None:
+        raise HTTPException(status_code=404, detail=f"数据集 {dataset_id} 不存在")
+    if snap["version"] == 0:
+        raise HTTPException(status_code=409, detail="数据集尚未发布，无可核查的已发布位点")
+    conflicts = find_conflicts(snap["variants"])
+    return {
+        "id": snap["id"],
+        "version": snap["version"],
+        "chrom": snap["chrom"],
+        "variant_count": len(snap["variants"]),
+        "conflict_count": len(conflicts),
+        "conflicts": conflicts,
+    }
 
 
 @app.post(

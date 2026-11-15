@@ -24,6 +24,29 @@ POS 非整数/越界、REF 超出染色体末端、多等位（ALT 含逗号）�
 **文件级致命错误**（HTTP 400，不产生任务）：FASTA 含多条序列、非法碱基字符、
 VCF 缺 `#CHROM` 头、非 UTF-8 文件。
 
+## 编辑冲突核查
+
+`GET /datasets/{id}/conflicts`：在把已发布变异拼成单条参考编辑路径前，核查数据集内
+**已发布**位点中无法直接同时套用的位点对（`app/conflicts.py`）。只读取已发布的规范化
+SNV/插入/缺失，**数据集未发布（version=0）时拒绝核查（409）**；版本号与全部位点对取自
+**同一已提交快照**（单读事务，并发发布不会读到混合状态）。
+
+冲突只定义在**实际编辑的参考碱基**上（SNV=被替换的 1 个碱基；缺失=锚点外被删的碱基；
+插入=断点本身不占参考碱基），且仅有以下五类（`type` 字段）：
+
+| type | 含义 |
+|---|---|
+| `snv_same_position` | 同位点不同 SNV |
+| `deletion_overlap` | 两处缺失的实际删除碱基重叠 |
+| `snv_in_deletion` | SNV 落入缺失的实际删除范围 |
+| `insertion_same_breakpoint` | 同一断点的不同插入 |
+| `insertion_breakpoint_deleted` | 插入断点两侧参考碱基均被删除（仅删一侧可与插入组合，不冲突） |
+
+**只报告实际冲突对**：冲突不可传递（甲-乙、乙-丙各自冲突不推出甲-丙冲突）；
+仅共用 VCF 锚点碱基不算冲突（如 SNV 落在缺失的锚点上、缺失之间共用锚点）。
+每个冲突对返回双方归一化位点及各自归并的**原始 VCF 行号**，响应头部的 `version`
+为核查所依据的已发布版本。
+
 ## 一致性模型
 
 - 上传生成**暂存任务**（job），处理期间查询仍返回**完整旧版**；
@@ -67,6 +90,9 @@ curl -s -X POST localhost:8000/datasets/1/publish \
 
 # 5. 查询任务状态（坏行明细 / 暂存结果）
 curl -s localhost:8000/datasets/1/jobs/1
+
+# 6. 编辑冲突核查（仅已发布位点；未发布返回 409）
+curl -s localhost:8000/datasets/1/conflicts
 ```
 
 ## API 一览
@@ -79,6 +105,7 @@ curl -s localhost:8000/datasets/1/jobs/1
 | POST | `/datasets/{id}/uploads` | 上传 FASTA+VCF 并归一化，生成暂存任务 |
 | GET | `/datasets/{id}/jobs/{job_id}` | 任务状态、坏行明细、暂存的归一化结果 |
 | POST | `/datasets/{id}/publish` | 按 `expected_version` 乐观锁发布；409=版本冲突，422=任务含坏行 |
+| GET | `/datasets/{id}/conflicts` | 核查已发布位点的编辑冲突对；409=数据集未发布 |
 | GET | `/healthz` | 健康检查 |
 
 ## 演示样本（`samples/`）
@@ -99,11 +126,24 @@ curl -s localhost:8000/datasets/1/jobs/1
 
 `bad.vcf`：5 条坏行（REF 不符、多等位、MNP、越界、CHROM 不符），用于演示坏行隔离。
 
+`conflicts.vcf`：编辑冲突边界样例（17 行归并为 15 个位点，恰好 9 对冲突，覆盖全部五类）：
+
+| 行号 | 写法 | 归一化 | 作用 |
+|---|---|---|---|
+| 5–7 | `17 A>G`×2、`17 A>T` | 同位点两个 SNV | `snv_same_position`（相同写法的两行归并为一个位点） |
+| 8–10 | `20 GAC>G`、`21 ACG>A`、`22 CGT>C` | 删 21-22 / 22-23 / 23-24 | 两对 `deletion_overlap`；del1 与 del3 不重叠 → **不传递** |
+| 11–12 | `22 C>T`、`24 T>A` | SNV | `snv_in_deletion`（分别落入 del1+del2、仅 del3） |
+| 13 | `20 G>A` | del1 锚点上的 SNV | 仅共用锚点 → **不冲突** |
+| 14 | `20 G>GA` | 断点 20 的插入 | 仅一侧（21）被删 → **不冲突** |
+| 15–17 | `30 T>TA`×2、`30 T>TC` | 同断点两个插入 | `insertion_same_breakpoint`（相同插入归并） |
+| 18–20 | `35 A>AG`、`34 TA>T`、`35 AC>A` | 断点 35 的插入 + 删 35、删 36 | 断点两侧均被删 → 两对 `insertion_breakpoint_deleted` |
+| 21 | `36 C>CG` | 断点 36 的插入 | 仅一侧（36）被删 → **不冲突** |
+
 ## 本地开发与测试
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python -m pytest tests/ -q          # 27 个测试：算法 + API + 并发发布
+.venv/bin/python -m pytest tests/ -q          # 50 个测试：算法 + API + 冲突核查 + 并发发布
 DATABASE_PATH=data/variants.db .venv/bin/python -m uvicorn app.main:app --reload
 ```
 
@@ -113,11 +153,12 @@ DATABASE_PATH=data/variants.db .venv/bin/python -m uvicorn app.main:app --reload
 app/
   main.py        FastAPI 入口与路由
   normalize.py   归一化算法（核对/修剪/锚点/左对齐）
+  conflicts.py   已发布位点的编辑冲突核查（五类规则）
   parse.py       FASTA/VCF 结构解析
   service.py     逐行校验、归并等价位点
-  store.py       SQLite 存储与乐观锁发布事务
+  store.py       SQLite 存储、乐观锁发布事务、快照读取
   schemas.py     请求/响应模型
-samples/         演示用 FASTA 与三份 VCF
+samples/         演示用 FASTA 与四份 VCF（含冲突边界样例）
 scripts/demo.py  端到端演示脚本（仅标准库）
 tests/           pytest 测试
 Dockerfile / docker-compose.yml

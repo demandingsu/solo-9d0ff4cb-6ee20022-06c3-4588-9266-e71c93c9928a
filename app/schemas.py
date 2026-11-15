@@ -1,6 +1,8 @@
 """API 请求/响应模型。"""
 from __future__ import annotations
 
+from enum import Enum
+
 from pydantic import BaseModel, Field
 
 
@@ -68,3 +70,35 @@ class PublishResponse(BaseModel):
     version: int = Field(description="发布后的新版本号")
     published_job_id: int
     variant_count: int
+
+
+class ConflictType(str, Enum):
+    """编辑冲突类型（仅实际编辑的参考碱基冲突才报告，详见 /docs）。"""
+
+    snv_same_position = "snv_same_position"  # 同位点不同 SNV
+    deletion_overlap = "deletion_overlap"  # 两处缺失的实际删除碱基重叠
+    snv_in_deletion = "snv_in_deletion"  # SNV 落入缺失的实际删除范围
+    insertion_same_breakpoint = "insertion_same_breakpoint"  # 同一断点的不同插入
+    insertion_breakpoint_deleted = "insertion_breakpoint_deleted"  # 插入断点两侧均被删除
+
+
+class ConflictLocus(BaseModel):
+    pos: int = Field(description="归一化后的 1-based 坐标")
+    ref: str
+    alt: str
+    lines: list[int] = Field(description="归并到该位点的所有原始 VCF 行号（含头部行计数，从 1 起）")
+
+
+class ConflictPair(BaseModel):
+    type: ConflictType
+    a: ConflictLocus = Field(description="冲突一方（SNV/插入类冲突中为 SNV 或插入方）")
+    b: ConflictLocus = Field(description="冲突另一方（SNV/插入-缺失类冲突中为缺失方）")
+
+
+class ConflictReport(BaseModel):
+    id: int
+    version: int = Field(description="核查所依据的已发布版本（与全部位点对来自同一已提交快照）")
+    chrom: str | None
+    variant_count: int = Field(description="已发布位点总数")
+    conflict_count: int = Field(description="冲突位点对总数")
+    conflicts: list[ConflictPair]

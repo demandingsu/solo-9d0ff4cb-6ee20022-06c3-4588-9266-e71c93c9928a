@@ -146,6 +146,35 @@ class Store:
         finally:
             conn.close()
 
+    def get_published_snapshot(self, dataset_id: int) -> dict | None:
+        """在同一读事务内读取数据集版本与全部已发布位点。
+
+        显式 BEGIN 开启读事务：WAL 模式下并发发布提交新版本时，
+        本事务看到的仍是开启时的已提交快照，版本号与位点列表必然一致。
+        """
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            row = conn.execute("SELECT * FROM datasets WHERE id = ?", (dataset_id,)).fetchone()
+            if row is None:
+                conn.rollback()
+                return None
+            vrows = conn.execute(
+                "SELECT chrom, pos, ref, alt, lines_json FROM variants "
+                "WHERE dataset_id = ? ORDER BY pos, ref, alt",
+                (dataset_id,),
+            ).fetchall()
+            detail = self._dataset_dict(row)
+            detail["chrom"] = vrows[0]["chrom"] if vrows else None
+            detail["variants"] = [self._variant_dict(v) for v in vrows]
+            conn.commit()
+            return detail
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     # ---------- 任务（上传暂存） ----------
 
     def create_job(
